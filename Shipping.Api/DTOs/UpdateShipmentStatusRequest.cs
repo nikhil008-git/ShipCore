@@ -12,4 +12,8 @@ public class UpdateShipmentStatusRequest
 {
   "status": "Delivered"
 }
+
+postman with put/patch
+
+PATCH /api/shipments/4/status
 */
