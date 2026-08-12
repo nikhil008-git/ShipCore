@@ -18,7 +18,9 @@ builder.Services.AddControllers();
 builder.Services.AddDbContext<AppDbContext>(options =>
 {
     var connectionString =
-        builder.Configuration.GetConnectionString(
+        Environment.GetEnvironmentVariable(
+            "ConnectionStrings__DefaultConnection"
+        ) ?? builder.Configuration.GetConnectionString(
             "DefaultConnection"
         );
 
@@ -32,7 +34,9 @@ builder.Services.AddScoped<CarrierService>();
 
 
 /// / jwt auth like jwt.verify but in dotnet.
-var jwtKey = builder.Configuration["Jwt:Key"]!;
+var jwtKey =
+    Environment.GetEnvironmentVariable("Jwt__Key")
+    ?? builder.Configuration["Jwt:Key"]!;
 
 builder.Services
     .AddAuthentication(
