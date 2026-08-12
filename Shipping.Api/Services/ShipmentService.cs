@@ -17,9 +17,9 @@ public class ShipmentService
     }
     public async Task<List<Shipment>> GetAllAsync(int userId)
     {
-        return await _db.shipments
+        return await _db.Shipments
             .Where(s => s.UserId == userId)
-            .Include(s.Carrier)
+            .Include(s => s.Carrier)
             .OrderByDescending(s => s.CreatedAt)
             .ToListAsync();
     }

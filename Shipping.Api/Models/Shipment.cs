@@ -5,6 +5,10 @@ public class Shipment
     public int Id { get; set; }
     public string TrackingNumber { get; set; } = string.Empty;
 
+    public string Destination { get; set; } = string.Empty;
+
+    public DateTime CreatedAt { get; set; }
+
     public ShipmentStatus Status { get; set; }
             = ShipmentStatus.Created;  // enum like created,    PickedUp, InTransit, Delivered
 
