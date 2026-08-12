@@ -13,7 +13,7 @@ public class AppDbContext : DbContext
      ) : base(options)
     {
     }
-    public DbSet<User> Users { get; set; } //EF Core, I want access to the Shipments table.
+    public DbSet<User> Users { get; set; } //EF Core, I want access to the user table.
 
     public DbSet<Shipment> Shipments { get; set; }
 
@@ -23,3 +23,11 @@ public class AppDbContext : DbContext
 
 
 }
+/* 
+Later:
+
+_db.Shipments
+
+is conceptually similar to:
+
+prisma.shipment*/
