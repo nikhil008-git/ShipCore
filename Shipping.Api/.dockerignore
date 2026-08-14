@@ -1,0 +1,5 @@
+bin/
+obj/
+.git/
+*.db
+Shipping.Functions/local.settings.json
