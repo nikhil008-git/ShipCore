@@ -1,6 +1,10 @@
-# Shipping integration assessment
+# ShipCore shipping integration assessment
 
-## Setup and run
+This repository implements the assessment with deterministic in-memory carrier stubs, a reusable carrier abstraction, a thread-safe token cache, and pure invoice-reconciliation logic.
+
+## Run locally
+
+Prerequisite: .NET SDK 10.
 
 ```bash
 dotnet restore Shipping.Assessment.sln
@@ -8,29 +12,112 @@ dotnet test Shipping.Assessment.sln
 dotnet run --project Shipping.Api.csproj
 ```
 
-Create a simulated shipment with `POST /api/carriers/speedship/shipments`; use `rapidpost` to exercise the second implementation. The fake integrations are selected through DI only when `CarrierIntegrations:TestMode` is `true`. This assessment intentionally ships no production HTTP clients, so setting it to `false` fails startup with a clear configuration error instead of silently using test doubles.
+The API runs at `http://localhost:5190` in the default launch profile. SQLite migrations are applied automatically on startup.
 
-## Notes
+`CarrierIntegrations:TestMode` is `true` in `appsettings.json`. This selects the deterministic, side-effect-free carrier stubs through dependency injection. Setting it to `false` intentionally fails startup, since production HTTP clients are outside this assessment's scope and the application must not silently run test doubles in production.
 
-### Assumptions
+## API smoke tests
 
-- `ICarrierIntegration` is the extension seam. SpeedShip uses cached bearer-token authentication; RapidPost signs its different payload with HMAC. Neither carrier knows about the other.
-- `TokenProvider` keeps token/expiry in an immutable record and shares one in-flight refresh task. It releases its lock before awaiting the network request, refreshes 30 seconds early, and removes a failed task so failures are never cached.
-- Shipment creation carries a customer-controlled `clientRef`. The SpeedShip stub stores by that key before it simulates a lost response, making a retry return the same tracking number. A 401 invalidates the token and permits exactly one re-authentication attempt.
-- The transient retry policy handles only timeout, 429 and 503 with exponential backoff plus jitter. It deliberately does not retry other 4xx responses. Labels return HTTP 202 while the stub's label is in its short eventual-consistency window; a client can poll with its own capped budget or await a webhook in production.
-- Invoice reconciliation is pure and deterministic. It groups by tracking number, so matching is O(n + m) time and O(n + m) space for one partition. It assumes one currency per invoice; `MIXED` is surfaced as a currency discrepancy rather than converted silently.
-- Duplicate billing is inferred from identical carrier lines because the supplied data has no parcel-line ID. A production feed should include an immutable carrier invoice-line/parcel ID to make this detection definitive.
+Create a SpeedShip shipment:
 
-### Scaling and carrier isolation
+```http
+POST /api/carriers/speedship/shipments
+Content-Type: application/json
 
-For 1M+ records, stream invoice/customer data partitioned by a stable hash of tracking number, reconcile one partition at a time, and persist partition completion with its source checksum. The Monday Azure Function is timer-triggered; its input adapter is deliberately stubbed so the reconciliation core remains testable.
+{
+  "clientRef": "ORDER-1001",
+  "recipientName": "Ada Lovelace",
+  "destinationCountry": "NL",
+  "weightKg": 1.25
+}
+```
 
-Azure Functions are at-least-once. I would use a unique `(invoiceWeek, partition, sourceChecksum)` row plus an outbox in the same EF Core transaction; duplicate invocations observe the completed row and have no second business effect. Give each carrier its own queue, concurrency cap, retry budget and circuit breaker, so a failing carrier cannot exhaust shared workers.
+It returns a tracking number such as `SS-ORDER-1001`. Repeating the same request returns the same tracking number: `clientRef` is the idempotency key.
 
-### Trade-offs and deliberate scope cuts
+Fetch the label:
 
-The carrier APIs are deterministic in-memory stubs, not network clients. No currency conversion, real PDF rendering, webhook receiver, distributed token cache, or invoice-source adapter is implemented. In a multi-instance deployment, move the token/idempotency coordination to a shared store or accept per-instance token refresh while retaining carrier-side idempotency.
+```http
+GET /api/carriers/speedship/shipments/SS-ORDER-1001/label
+```
 
-### With more time
+SpeedShip labels are eventually consistent. The API returns `202 Accepted` with `{ "status": "pending" }` during the short availability window; retry after a short, capped polling interval. When ready it returns the base64 PDF label with `200 OK`.
 
-I would add real, separately configured HTTP clients for each carrier; a durable distributed token/idempotency store; an invoice-source adapter and currency conversion; and webhook delivery with an outbox. I would also add integration tests against contract-test servers and operational telemetry for retries, token refreshes, reconciliation partitions, and carrier-specific circuit breakers.
+RapidPost uses the same calling API but a different internal contract:
+
+```http
+POST /api/carriers/rapidpost/shipments
+Content-Type: application/json
+
+{
+  "clientRef": "ORDER-2001",
+  "recipientName": "Ada Lovelace",
+  "destinationCountry": "NL",
+  "weightKg": 0.75
+}
+```
+
+`GET /api/carriers/rapidpost/shipments/RP-ORDER-2001/label` returns its label immediately.
+
+Invoice reconciliation is deliberately a pure C# service, not an HTTP endpoint. The scheduled Azure Function owns orchestration; production ingestion/persistence is deliberately stubbed so the reconciliation algorithm remains deterministic and trivial to test.
+
+## Design notes
+
+### Carrier extension seam
+
+`ICarrierIntegration` is the extension seam. The controller resolves a carrier by code and only knows the shared request/result contracts. `SpeedShipIntegration` implements cached bearer-token authentication; `RapidPostIntegration` maps the same request into its own payload and signs it with HMAC. Adding a carrier does not require changing either existing carrier or the controller.
+
+### Authentication, idempotency, and retries
+
+- `TokenProvider` stores token and expiry together in an immutable record, uses a 30-second early-refresh margin, and shares one in-flight refresh task. Fifty callers with a cold cache result in one token request; the lock is released before awaiting the refresh. Failed refreshes are removed rather than cached.
+- SpeedShip stores a shipment by `clientRef` before it can simulate a lost response. A retry returns the original carrier tracking number rather than creating another shipment.
+- A SpeedShip `401` invalidates the rejected token and retries authentication exactly once. The bounded loop prevents an infinite auth loop.
+- `RetryPolicy` retries only timeouts, `429`, and `503`, using exponential backoff plus jitter. It does not retry ordinary `4xx` responses. Retrying shipment creation is safe here because the carrier honours the supplied idempotency key; this would not be safe for an operation without that guarantee.
+- For labels, the caller gets `202` while the label is pending. A client may poll with a capped budget; in production, a webhook/outbox flow is preferable for longer delays.
+
+### Reconciliation
+
+`InvoiceReconciler` is side-effect-free and deterministic. It groups both inputs by tracking number, aggregates multi-parcel lines, and emits a structured `DiscrepancyReport` containing the discrepancy type, tracking number, expected value, actual value, magnitude, and currency where applicable.
+
+It reports missing carrier invoices, missing customer charges, price mismatches, weight mismatches, zone mismatches, currency mismatches, and duplicate carrier billing. Price and weight tolerances are explicit and configurable through `ReconciliationOptions` (default: €0.01 and 10 g). The current assumption is one currency per invoice/input group; mixed values are surfaced as `MIXED` rather than silently converted.
+
+Matching is `O(n + m)` time and `O(n + m)` memory for one partition, where `n` is carrier invoice lines and `m` is customer charges. Duplicate billing is inferred from identical carrier lines because the supplied model has no immutable parcel/invoice-line ID; a production feed should provide that ID for definitive duplicate detection.
+
+### Scale and Azure Functions
+
+For 1M+ weekly records, an ingestion adapter should stream both data sets partitioned by a stable hash of tracking number, reconcile one partition at a time, and persist each partition's source checksum and completion state. This avoids loading a full invoice week into memory and permits safe restarts.
+
+Azure Functions timer triggers are at-least-once. To give reconciliation exactly-once business effects, persist a unique `(invoiceWeek, partition, sourceChecksum)` record and an outbox entry in the same transaction. A duplicate invocation observes the completed partition and produces no second effect.
+
+Each carrier should have an independent queue, concurrency cap, retry budget, and circuit breaker. This keeps a failing carrier from consuming shared worker capacity or taking down the other integrations.
+
+## Tests
+
+The tests focus on the failure and concurrency cases rather than only happy paths:
+
+- 50 concurrent cold-cache token callers share one token refresh and refresh correctly at the early-expiry boundary.
+- A failed token refresh is not cached.
+- A timeout after SpeedShip has created a shipment retries safely and returns the original tracking number.
+- `503` is retried with backoff; `400` is not.
+- A mid-flight `401` invalidates the token and performs one re-authentication retry.
+- Reconciliation verifies multi-parcel aggregation, duplicate detection, tolerances, and missing records.
+
+Run them with:
+
+```bash
+dotnet test Shipping.Assessment.sln
+```
+
+## Docker
+
+The Dockerfile restores dependencies, runs the test suite during the build, publishes the API, and runs the published service:
+
+```bash
+docker build -t shipcore-shipping-api .
+docker run --rm -p 8080:8080 -e ASPNETCORE_URLS=http://+:8080 shipcore-shipping-api
+```
+
+## Deliberate scope cuts / next steps
+
+The carrier APIs are in-memory test stubs rather than real HTTP clients. Real PDF generation, webhook handling, distributed token/idempotency coordination, currency conversion, and the invoice-source adapter are not implemented. In a multi-instance deployment, move token and idempotency coordination to shared infrastructure while retaining carrier-side idempotency guarantees.
+
+With more time, I would add per-carrier configured HTTP clients, contract tests against a test server, durable invoice ingestion, an outbox-backed webhook flow, and metrics for retries, token refreshes, reconciliation partitions, and carrier circuit breakers.
