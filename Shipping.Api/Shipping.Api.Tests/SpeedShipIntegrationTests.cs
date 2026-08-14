@@ -47,6 +47,22 @@ public sealed class SpeedShipIntegrationTests
         Assert.Equal(3, stub.ShipmentCreateRequests);
     }
 
+    [Fact]
+    public async Task Unauthorized_response_invalidates_the_token_and_reauthenticates_once()
+    {
+        var clock = new TestClock(DateTimeOffset.Parse("2026-01-01T00:00:00Z"));
+        var stub = new SpeedShipStub(clock);
+        var integration = new SpeedShipIntegration(stub, new TokenProvider(stub.GetTokenAsync, clock), NoWaitRetryPolicy());
+        stub.QueueShipmentFault(SpeedShipFault.Unauthorized);
+
+        var result = await integration.CreateShipmentAsync(new CarrierShipmentRequest("order-401", "Ada", "NL", 1m));
+
+        Assert.Equal("SS-order-401", result.CarrierTrackingNumber);
+        Assert.Equal(2, stub.TokenRequests);
+        Assert.Equal(2, stub.ShipmentCreateRequests);
+        Assert.Equal(1, stub.ShipmentCount);
+    }
+
     private static RetryPolicy NoWaitRetryPolicy() => new(new RetryPolicyOptions
     {
         MaxRetries = 2,

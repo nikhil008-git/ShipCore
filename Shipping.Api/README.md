@@ -8,7 +8,7 @@ dotnet test Shipping.Assessment.sln
 dotnet run --project Shipping.Api.csproj
 ```
 
-Create a simulated shipment with `POST /api/carriers/speedship/shipments`; use `rapidpost` to exercise the second implementation. The fake integrations are selected through DI and `CarrierIntegrations:TestMode` in `appsettings.json`.
+Create a simulated shipment with `POST /api/carriers/speedship/shipments`; use `rapidpost` to exercise the second implementation. The fake integrations are selected through DI only when `CarrierIntegrations:TestMode` is `true`. This assessment intentionally ships no production HTTP clients, so setting it to `false` fails startup with a clear configuration error instead of silently using test doubles.
 
 ## Design notes
 

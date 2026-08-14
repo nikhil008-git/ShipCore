@@ -30,4 +30,22 @@ public sealed class TokenProviderTests
         await provider.GetTokenAsync();
         Assert.Equal(2, refreshCalls);
     }
+
+    [Fact]
+    public async Task Failed_refresh_is_not_cached_and_the_next_call_can_refresh()
+    {
+        var clock = new TestClock(DateTimeOffset.Parse("2026-01-01T00:00:00Z"));
+        var refreshCalls = 0;
+        var provider = new TokenProvider(_ =>
+        {
+            var attempt = Interlocked.Increment(ref refreshCalls);
+            return attempt == 1
+                ? Task.FromException<AccessToken>(new HttpRequestException("temporary auth outage"))
+                : Task.FromResult(new AccessToken("recovered-token", clock.UtcNow.AddMinutes(5)));
+        }, clock);
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => provider.GetTokenAsync());
+        Assert.Equal("recovered-token", await provider.GetTokenAsync());
+        Assert.Equal(2, refreshCalls);
+    }
 }
